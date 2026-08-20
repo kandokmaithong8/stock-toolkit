@@ -35,8 +35,8 @@ LOG_PATH = Path(__file__).parent / "predictions_log.csv"
 LOG_COLUMNS = [
     "run_date", "ticker", "source", "model_type", "horizon",
     "as_of_date", "target_date", "last_close", "predicted_price",
-    "predicted_change_pct", "actual_price", "error", "abs_pct_error",
-    "direction_correct",
+    "predicted_change_pct", "implied_move_in_std_devs", "plausible",
+    "actual_price", "error", "abs_pct_error", "direction_correct",
 ]
 
 
@@ -136,14 +136,17 @@ def log_new_predictions(df: pd.DataFrame, tickers: list[str], source: str,
             "last_close": pred["last_close"],
             "predicted_price": pred["predicted_price"],
             "predicted_change_pct": pred["predicted_change_pct"],
+            "implied_move_in_std_devs": pred["implied_move_in_std_devs"],
+            "plausible": pred["plausible"],
             "actual_price": None,
             "error": None,
             "abs_pct_error": None,
             "direction_correct": None,
         })
+        flag = "" if pred["plausible"] else "  ⚠️ FLAGGED AS IMPLAUSIBLE"
         print(f"  Logged {ticker}: as-of {pred['as_of_date']} close {pred['last_close']:.2f} "
               f"-> predicted {pred['predicted_price']:.2f} on {pred['target_date']} "
-              f"({pred['predicted_change_pct']:+.2f}%)")
+              f"({pred['predicted_change_pct']:+.2f}%){flag}")
 
     if new_rows:
         df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
