@@ -205,8 +205,8 @@ def main():
                     help="Must sum to 1.0. Defaults to equal weight.")
     p.add_argument("--start", default="2018-01-01")
     p.add_argument("--end", default=None)
-    p.add_argument("--source", choices=["yahoo", "settrade"], default="yahoo",
-                    help="'settrade' requires SETTRADE_* env vars — see settrade_source.py")
+    p.add_argument("--source", choices=["yahoo", "settrade", "alpha_vantage", "twelve_data", "finnhub"], default="yahoo",
+                    help="non-yahoo sources need an API key env var — see each *_source.py module")
     p.add_argument("--risk-free-rate", type=float, default=0.02)
     p.add_argument("--optimize", choices=["max_sharpe", "min_volatility"], default=None)
     p.add_argument("--out", default="portfolio_results.json")
