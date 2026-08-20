@@ -29,14 +29,17 @@ from sklearn.preprocessing import StandardScaler
 from data_utils import fetch_ohlcv, add_technical_indicators
 
 FEATURE_COLUMNS = [
-    "Close", "Volume", "return_1d", "log_return_1d",
-    "sma_5", "sma_10", "sma_20", "sma_50",
-    "ema_5", "ema_10", "ema_20", "ema_50",
+    # Relative/scale-invariant features only — see data_utils.add_technical_indicators
+    # for why raw price-level features (Close, SMA, EMA, MACD, Bollinger
+    # Bands) are deliberately excluded here.
+    "return_1d", "log_return_1d",
+    "close_to_sma_5", "close_to_sma_10", "close_to_sma_20", "close_to_sma_50",
+    "close_to_ema_5", "close_to_ema_10", "close_to_ema_20", "close_to_ema_50",
     "volatility_10", "volatility_20",
-    "rsi_14", "macd", "macd_signal", "macd_hist",
-    "bb_width", "volume_change", "volume_sma_10",
+    "rsi_14", "macd_norm", "macd_signal_norm", "macd_hist_norm",
+    "bb_width", "bb_position", "volume_change", "volume_ratio",
 ]
-TARGET_COLUMN = "Close"
+TARGET_COLUMN = "Close"   # raw close price — used to derive the (relative) target and to reconstruct price predictions for reporting
 
 
 # --------------------------------------------------------------------------- #
@@ -88,10 +91,20 @@ def _to_sequences(df: pd.DataFrame, feature_columns: list[str], lookback: int,
 
 
 def prepare_features(cfg: ForecastConfig) -> pd.DataFrame:
-    """Fetch data and engineer features + horizon-ahead target column."""
+    """Fetch data and engineer features + horizon-ahead target column.
+
+    The target is the log-return over the horizon (log(future_close /
+    current_close)), NOT the absolute future price. Log-returns stay in a
+    roughly stable, small range (e.g. ~N(0, 0.02) for daily moves) no matter
+    how much the stock's price has grown historically, which keeps the
+    StandardScaler's fitted range valid at prediction time — unlike an
+    absolute-price target, which silently breaks the moment "today's" price
+    has drifted outside the range the scaler saw during training (see
+    predict_next / evaluate for how the price is reconstructed afterward).
+    """
     raw = fetch_ohlcv(cfg.ticker, cfg.start, cfg.end, source=cfg.source)
     feats = add_technical_indicators(raw)
-    feats["target"] = feats[TARGET_COLUMN].shift(-cfg.horizon)
+    feats["target"] = np.log(feats[TARGET_COLUMN].shift(-cfg.horizon) / feats[TARGET_COLUMN])
     return feats
 
 
@@ -254,15 +267,20 @@ def evaluate(model, data: dict, device: str = "cpu"):
         pred_scaled = model(X_test).cpu().numpy()
 
     y_scaler = data["y_scaler"]
-    pred = y_scaler.inverse_transform(pred_scaled.reshape(-1, 1)).ravel()
-    actual = y_scaler.inverse_transform(data["y_test"].reshape(-1, 1)).ravel()
+    # Model predicts a log-return; reconstruct price level by applying it to
+    # the "as-of" close for each test point (see prepare_features for why
+    # returns, not absolute price, are what's actually predicted).
+    pred_return = y_scaler.inverse_transform(pred_scaled.reshape(-1, 1)).ravel()
+    actual_return = y_scaler.inverse_transform(data["y_test"].reshape(-1, 1)).ravel()
+
+    prev_close = data["raw_close"].reindex(data["dates_test"]).values
+    pred = prev_close * np.exp(pred_return)
+    actual = prev_close * np.exp(actual_return)   # reconstructs the real future close
 
     rmse = float(np.sqrt(np.mean((pred - actual) ** 2)))
     mae = float(np.mean(np.abs(pred - actual)))
     mape = float(np.mean(np.abs((pred - actual) / actual)) * 100)
 
-    # Directional accuracy vs. the price `horizon` days earlier
-    prev_close = data["raw_close"].reindex(data["dates_test"]).values
     actual_dir = np.sign(actual - prev_close)
     pred_dir = np.sign(pred - prev_close)
     directional_acc = float(np.mean(actual_dir == pred_dir) * 100)
@@ -287,13 +305,16 @@ def _evaluate_fold(model, X_test, y_test, y_scaler, dates_test, raw_close, devic
     with torch.no_grad():
         pred_scaled = model(torch.from_numpy(X_test).to(device)).cpu().numpy()
 
-    pred = y_scaler.inverse_transform(pred_scaled.reshape(-1, 1)).ravel()
-    actual = y_scaler.inverse_transform(y_test.reshape(-1, 1)).ravel()
+    pred_return = y_scaler.inverse_transform(pred_scaled.reshape(-1, 1)).ravel()
+    actual_return = y_scaler.inverse_transform(y_test.reshape(-1, 1)).ravel()
+
+    prev_close = raw_close.reindex(dates_test).values
+    pred = prev_close * np.exp(pred_return)
+    actual = prev_close * np.exp(actual_return)
 
     rmse = float(np.sqrt(np.mean((pred - actual) ** 2)))
     mae = float(np.mean(np.abs(pred - actual)))
 
-    prev_close = raw_close.reindex(dates_test).values
     actual_dir = np.sign(actual - prev_close)
     pred_dir = np.sign(pred - prev_close)
     directional_acc = float(np.mean(actual_dir == pred_dir) * 100)
@@ -445,14 +466,26 @@ def predict_next(cfg: ForecastConfig, device: str | None = None) -> dict:
     model.eval()
     with torch.no_grad():
         pred_scaled = model(X_pred).cpu().numpy()
-    predicted_price = float(y_scaler.inverse_transform(pred_scaled.reshape(-1, 1)).ravel()[0])
+    predicted_return = float(y_scaler.inverse_transform(pred_scaled.reshape(-1, 1)).ravel()[0])
 
     last_date = full_feats.index[-1]
     last_close = float(full_feats[TARGET_COLUMN].iloc[-1])
+    predicted_price = last_close * float(np.exp(predicted_return))
     # Approximate target date: last_date + horizon business days (actual SET/
     # exchange holidays aren't modeled — the logger's backfill step is
     # tolerant of this, see predict_logger.py).
     target_date = (last_date + pd.tseries.offsets.BDay(cfg.horizon))
+
+    # Defense-in-depth plausibility check: flag (don't hide) predictions
+    # implying a move far beyond the stock's own recent historical
+    # volatility. Even with return-based, scale-invariant features this can
+    # still happen (e.g. a model quirk, very illiquid stock, or a sudden
+    # regime change) — this doesn't silence such predictions, just marks
+    # them so they're not mistaken for a normal, trustworthy forecast.
+    recent_daily_vol = float(full_feats["log_return_1d"].iloc[-60:].std())
+    expected_move_std = recent_daily_vol * np.sqrt(cfg.horizon) if recent_daily_vol > 0 else 0.0
+    implied_move_stds = abs(predicted_return) / expected_move_std if expected_move_std > 0 else 0.0
+    plausible = implied_move_stds <= 6.0
 
     return {
         "ticker": cfg.ticker,
@@ -464,6 +497,8 @@ def predict_next(cfg: ForecastConfig, device: str | None = None) -> dict:
         "last_close": last_close,
         "predicted_price": predicted_price,
         "predicted_change_pct": (predicted_price - last_close) / last_close * 100,
+        "implied_move_in_std_devs": round(implied_move_stds, 2),
+        "plausible": bool(plausible),
     }
 
 
