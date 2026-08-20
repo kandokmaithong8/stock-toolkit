@@ -29,7 +29,7 @@ from pathlib import Path
 import pandas as pd
 
 from data_utils import fetch_ohlcv
-from forecasting import ForecastConfig, predict_next
+from forecasting import ForecastConfig, predict_multi_horizon
 
 LOG_PATH = Path(__file__).parent / "predictions_log.csv"
 LOG_COLUMNS = [
@@ -102,58 +102,72 @@ def backfill_actuals(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def log_new_predictions(df: pd.DataFrame, tickers: list[str], source: str,
-                         model_type: str, horizon: int, lookback: int,
+                         model_type: str, horizons: list[int], lookback: int,
                          start: str, epochs: int,
                          hidden_size: int = 64, num_layers: int = 2,
                          dropout: float = 0.2) -> pd.DataFrame:
+    """
+    Logs one row per (ticker, horizon) — e.g. horizons=[1,2,3] gives you
+    the "next 3 targets" for each ticker: independently trained 1-day,
+    2-day, and 3-day-ahead predictions, all made from today's data. See
+    forecasting.predict_multi_horizon for why each horizon gets its own
+    model rather than one model queried three times.
+    """
     run_date = pd.Timestamp.today().strftime("%Y-%m-%d")
     new_rows = []
 
     for ticker in tickers:
-        # Skip if we already logged a prediction for this ticker today
-        already_done = ((df["ticker"] == ticker) & (df["run_date"] == run_date)).any()
-        if already_done:
-            print(f"  Skipping {ticker} — already logged today.")
+        base_cfg = ForecastConfig(
+            ticker=ticker, start=start, source=source,
+            horizon=horizons[0], lookback=lookback,
+            model_type=model_type, epochs=epochs,
+            hidden_size=hidden_size, num_layers=num_layers, dropout=dropout,
+        )
+
+        pending_horizons = []
+        for h in horizons:
+            already_done = ((df["ticker"] == ticker) & (df["run_date"] == run_date) & (df["horizon"] == h)).any()
+            if already_done:
+                print(f"  Skipping {ticker} horizon={h} — already logged today.")
+            else:
+                pending_horizons.append(h)
+        if not pending_horizons:
             continue
 
         try:
-            cfg = ForecastConfig(
-                ticker=ticker, start=start, source=source,
-                horizon=horizon, lookback=lookback,
-                model_type=model_type, epochs=epochs,
-                hidden_size=hidden_size, num_layers=num_layers, dropout=dropout,
-            )
-            pred = predict_next(cfg)
+            preds = predict_multi_horizon(base_cfg, horizons=tuple(pending_horizons))
         except Exception as e:
             print(f"  Failed to predict {ticker}: {e}")
             continue
 
-        new_rows.append({
-            "run_date": run_date,
-            "ticker": pred["ticker"],
-            "source": pred["source"],
-            "model_type": pred["model_type"],
-            "horizon": pred["horizon"],
-            "as_of_date": pred["as_of_date"],
-            "target_date": pred["target_date"],
-            "last_close": pred["last_close"],
-            "predicted_price": pred["predicted_price"],
-            "predicted_change_pct": pred["predicted_change_pct"],
-            "implied_move_in_std_devs": pred["implied_move_in_std_devs"],
-            "plausible": pred["plausible"],
-            "actual_price": None,
-            "error": None,
-            "abs_pct_error": None,
-            "direction_correct": None,
-        })
-        flag = "" if pred["plausible"] else "  ⚠️ FLAGGED AS IMPLAUSIBLE"
-        print(f"  Logged {ticker}: as-of {pred['as_of_date']} close {pred['last_close']:.2f} "
-              f"-> predicted {pred['predicted_price']:.2f} on {pred['target_date']} "
-              f"({pred['predicted_change_pct']:+.2f}%){flag}")
+        for pred in preds:
+            new_rows.append({
+                "run_date": run_date,
+                "ticker": pred["ticker"],
+                "source": pred["source"],
+                "model_type": pred["model_type"],
+                "horizon": pred["horizon"],
+                "as_of_date": pred["as_of_date"],
+                "target_date": pred["target_date"],
+                "last_close": pred["last_close"],
+                "predicted_price": pred["predicted_price"],
+                "predicted_change_pct": pred["predicted_change_pct"],
+                "implied_move_in_std_devs": pred["implied_move_in_std_devs"],
+                "plausible": pred["plausible"],
+                "actual_price": None,
+                "error": None,
+                "abs_pct_error": None,
+                "direction_correct": None,
+            })
+            flag = "" if pred["plausible"] else "  ⚠️ FLAGGED AS IMPLAUSIBLE"
+            print(f"  Logged {ticker} (horizon={pred['horizon']}): as-of {pred['as_of_date']} "
+                  f"close {pred['last_close']:.2f} -> predicted {pred['predicted_price']:.2f} "
+                  f"on {pred['target_date']} ({pred['predicted_change_pct']:+.2f}%){flag}")
 
     if new_rows:
         df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
     return df
+
 
 
 def main():
@@ -161,7 +175,9 @@ def main():
     p.add_argument("--tickers", nargs="+", required=True)
     p.add_argument("--source", choices=["yahoo", "settrade", "alpha_vantage", "twelve_data", "finnhub"], default="yahoo")
     p.add_argument("--model-type", choices=["lstm", "gru"], default="lstm")
-    p.add_argument("--horizon", type=int, default=1)
+    p.add_argument("--horizons", type=int, nargs="+", default=[1, 2, 3],
+                    help="Trading days ahead to predict — e.g. '1 2 3' logs the next 3 targets "
+                         "per ticker, each from its own independently trained model")
     p.add_argument("--lookback", type=int, default=60,
                     help="Overridden by --hidden-size etc. if you pass tuned values from forecasting.py --tune")
     p.add_argument("--start", default="2018-01-01", help="Training history start date")
@@ -183,7 +199,7 @@ def main():
     print("Generating today's predictions...")
     df = log_new_predictions(
         df, tickers=args.tickers, source=args.source,
-        model_type=args.model_type, horizon=args.horizon,
+        model_type=args.model_type, horizons=args.horizons,
         lookback=args.lookback, start=args.start, epochs=args.epochs,
         hidden_size=args.hidden_size, num_layers=args.num_layers, dropout=args.dropout,
     )
