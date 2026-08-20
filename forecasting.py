@@ -503,6 +503,82 @@ def predict_next(cfg: ForecastConfig, device: str | None = None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Hyperparameter tuning (scored by walk-forward validation, not a lucky split)
+# --------------------------------------------------------------------------- #
+DEFAULT_PARAM_GRID = {
+    "hidden_size": [32, 64, 128],
+    "num_layers": [1, 2],
+    "lookback": [20, 40, 60],
+    "dropout": [0.1, 0.2, 0.3],
+}
+
+
+def tune_hyperparameters(base_cfg: ForecastConfig, param_grid: dict | None = None,
+                          n_folds: int = 3, fold_epochs: int = 20,
+                          max_trials: int = 8, seed: int = 42) -> dict:
+    """
+    Random search over hyperparameters (hidden_size, num_layers, lookback,
+    dropout by default), each trial scored by walk-forward validation
+    rather than a single train/test split — a config that only looks good
+    because it got a lucky split won't win here, since it has to hold up
+    across several rolling folds.
+
+    Expensive: max_trials * n_folds model trainings total. Reasonable
+    defaults (8 trials x 3 folds x 20 epochs) take several minutes on CPU,
+    not seconds — this is meant for a GitHub Action or your own machine,
+    not the interactive Streamlit demo (see Streamlit Forecast Demo tab,
+    which deliberately doesn't expose this for that reason).
+
+    Returns every trial's result sorted by mean RMSE (best first), plus
+    best_cfg — a ForecastConfig ready to pass straight into
+    predict_next()/walk_forward_evaluate()/build_dataset().
+    """
+    import itertools
+    import random
+
+    grid = param_grid or DEFAULT_PARAM_GRID
+    keys = list(grid.keys())
+    combos = list(itertools.product(*[grid[k] for k in keys]))
+    random.Random(seed).shuffle(combos)
+    combos = combos[:max_trials]
+
+    trials = []
+    for i, combo in enumerate(combos):
+        overrides = dict(zip(keys, combo))
+        trial_cfg = ForecastConfig(**{**base_cfg.__dict__, **overrides})
+        print(f"Trial {i + 1}/{len(combos)}: {overrides}")
+        try:
+            result = walk_forward_evaluate(trial_cfg, n_folds=n_folds, fold_epochs=fold_epochs)
+        except ValueError as e:
+            print(f"  Skipped (not enough data for this config): {e}")
+            continue
+
+        s = result["summary"]
+        trials.append({
+            "params": overrides,
+            "mean_rmse": s["mean_rmse"],
+            "mean_directional_accuracy_pct": s["mean_directional_accuracy_pct"],
+            "folds_beating_naive_baseline_pct": s["folds_beating_naive_baseline_pct"],
+        })
+        print(f"  mean RMSE {s['mean_rmse']:.4f} | "
+              f"dir. acc {s['mean_directional_accuracy_pct']:.1f}% | "
+              f"beat-naive {s['folds_beating_naive_baseline_pct']:.0f}% of folds")
+
+    if not trials:
+        raise ValueError(
+            "No hyperparameter trials completed — likely not enough data "
+            "for the larger lookback values in the grid. Try a longer "
+            "--start range or a smaller param_grid."
+        )
+
+    trials.sort(key=lambda t: t["mean_rmse"])
+    best_params = trials[0]["params"]
+    best_cfg = ForecastConfig(**{**base_cfg.__dict__, **best_params})
+
+    return {"trials": trials, "best_params": best_params, "best_cfg": best_cfg}
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 def main():
@@ -518,8 +594,11 @@ def main():
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--walk-forward", action="store_true",
                     help="Run rolling-origin walk-forward validation instead of a single split")
-    p.add_argument("--folds", type=int, default=5, help="Number of folds for --walk-forward")
-    p.add_argument("--fold-epochs", type=int, default=30, help="Epochs per fold for --walk-forward")
+    p.add_argument("--folds", type=int, default=5, help="Number of folds for --walk-forward / --tune")
+    p.add_argument("--fold-epochs", type=int, default=30, help="Epochs per fold for --walk-forward / --tune")
+    p.add_argument("--tune", action="store_true",
+                    help="Search hyperparameters via walk-forward validation instead of a single training run")
+    p.add_argument("--tune-trials", type=int, default=8, help="Number of random param combos to try for --tune")
     p.add_argument("--out", default="forecast_results.json")
     args = p.parse_args()
 
@@ -528,6 +607,19 @@ def main():
         horizon=args.horizon, lookback=args.lookback,
         model_type=args.model_type, epochs=args.epochs,
     )
+
+    if args.tune:
+        print(f"Tuning hyperparameters for {cfg.ticker} "
+              f"({args.tune_trials} trials, {args.folds}-fold walk-forward each)...")
+        tune_result = tune_hyperparameters(
+            cfg, n_folds=args.folds, fold_epochs=args.fold_epochs, max_trials=args.tune_trials
+        )
+        print("\nBest params:", tune_result["best_params"])
+        print(f"Best mean RMSE: {tune_result['trials'][0]['mean_rmse']:.4f}")
+        with open(args.out, "w") as f:
+            json.dump({"trials": tune_result["trials"], "best_params": tune_result["best_params"]}, f, indent=2)
+        print(f"Full results written to {args.out}")
+        return
 
     if args.walk_forward:
         print(f"Running {args.folds}-fold walk-forward validation for {cfg.ticker}...")
