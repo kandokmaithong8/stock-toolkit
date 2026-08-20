@@ -235,4 +235,9 @@ with tab_log:
                 st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("**Full log**")
-            st.dataframe(filtered.sort_values("run_date", ascending=False), use_container_width=True)
+            display_df = filtered.sort_values("run_date", ascending=False).copy()
+            if "plausible" in display_df.columns:
+                display_df["plausible"] = display_df["plausible"].map(
+                    {True: "✅", False: "⚠️ flagged"}
+                ).fillna("—")
+            st.dataframe(display_df, use_container_width=True)
