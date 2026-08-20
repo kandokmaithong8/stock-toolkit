@@ -23,9 +23,10 @@ import streamlit as st
 
 # --------------------------------------------------------------------------- #
 # Bridge Streamlit Cloud secrets -> environment variables, so the existing
-# env-var-based settrade_source.py works unmodified.
+# env-var-based *_source.py adapters work unmodified.
 # --------------------------------------------------------------------------- #
-for _key in ("SETTRADE_APP_ID", "SETTRADE_APP_SECRET", "SETTRADE_BROKER_ID", "SETTRADE_APP_CODE"):
+for _key in ("SETTRADE_APP_ID", "SETTRADE_APP_SECRET", "SETTRADE_BROKER_ID", "SETTRADE_APP_CODE",
+             "ALPHAVANTAGE_API_KEY", "TWELVEDATA_API_KEY", "FINNHUB_API_KEY"):
     if _key in st.secrets:
         os.environ[_key] = st.secrets[_key]
 
@@ -58,7 +59,7 @@ with tab_portfolio:
                  "or Yahoo symbols (e.g. AAPL, PTT.BK) with the yahoo source."
         )
     with col2:
-        source = st.selectbox("Data source", ["yahoo", "settrade"], key="pf_source")
+        source = st.selectbox("Data source", ["yahoo", "settrade", "alpha_vantage", "twelve_data", "finnhub"], key="pf_source")
 
     tickers = [t.strip().upper() for t in tickers_input.replace(",", " ").split() if t.strip()]
 
@@ -127,7 +128,7 @@ with tab_forecast:
     fc1, fc2, fc3 = st.columns(3)
     with fc1:
         fc_ticker = st.text_input("Ticker", value="AAPL")
-        fc_source = st.selectbox("Data source", ["yahoo", "settrade"], key="fc_source")
+        fc_source = st.selectbox("Data source", ["yahoo", "settrade", "alpha_vantage", "twelve_data", "finnhub"], key="fc_source")
     with fc2:
         fc_start = st.date_input(
             "History start",
