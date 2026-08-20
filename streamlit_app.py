@@ -129,7 +129,14 @@ with tab_forecast:
         fc_ticker = st.text_input("Ticker", value="AAPL")
         fc_source = st.selectbox("Data source", ["yahoo", "settrade"], key="fc_source")
     with fc2:
-        fc_start = st.date_input("History start", value=pd.Timestamp("2018-01-01")).strftime("%Y-%m-%d")
+        fc_start = st.date_input(
+            "History start",
+            value=pd.Timestamp.today() - pd.Timedelta(days=730),
+            max_value=pd.Timestamp.today() - pd.Timedelta(days=200),
+            help="Start of the TRAINING history, not a forecast date. Needs "
+                 "roughly 1-2+ years so there's enough data after technical "
+                 "indicators warm up and after the train/val/test split.",
+        ).strftime("%Y-%m-%d")
         fc_model = st.selectbox("Model", ["lstm", "gru"])
     with fc3:
         fc_epochs = st.slider("Epochs", min_value=5, max_value=60, value=25,
