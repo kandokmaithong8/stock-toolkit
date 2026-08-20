@@ -1,0 +1,59 @@
+name: Daily Predictions
+
+# Runs entirely on GitHub's servers — no local machine or always-on server
+# needed. Commits the updated predictions_log.csv back to this repo, which
+# the Streamlit app reads and (via Streamlit Cloud's auto-redeploy-on-push)
+# picks up automatically.
+
+on:
+  schedule:
+    # 10:00 UTC = 17:00 Bangkok (ICT, UTC+7) — after the SET closes (16:30
+    # ICT) and after the US market closes if you're also tracking US tickers
+    # via Yahoo (16:00 ET = ~20:00-21:00 UTC depending on DST; adjust the
+    # cron below or add a second schedule entry if you want same-day US
+    # closes too).
+    - cron: "0 10 * * 1-5"   # weekdays only
+  workflow_dispatch: {}       # lets you trigger a manual run from the Actions tab
+
+permissions:
+  contents: write   # needed so the job can commit the updated CSV back
+
+jobs:
+  log-predictions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run prediction logger
+        env:
+          # Only needed if you're using --source settrade below. Add these
+          # as repo secrets under Settings > Secrets and variables > Actions.
+          SETTRADE_APP_ID: ${{ secrets.SETTRADE_APP_ID }}
+          SETTRADE_APP_SECRET: ${{ secrets.SETTRADE_APP_SECRET }}
+          SETTRADE_BROKER_ID: ${{ secrets.SETTRADE_BROKER_ID }}
+          SETTRADE_APP_CODE: ${{ secrets.SETTRADE_APP_CODE }}
+        run: |
+          python predict_logger.py \
+            --tickers AAPL MSFT GOOGL \
+            --source yahoo \
+            --model-type lstm \
+            --epochs 50
+          # Add a second line here with --source settrade and your SET
+          # tickers (e.g. PTT KBANK AOT) once your credentials are set up.
+
+      - name: Commit updated log
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add predictions_log.csv
+          git diff --staged --quiet || git commit -m "Update predictions log $(date -u +%F)"
+          git push
