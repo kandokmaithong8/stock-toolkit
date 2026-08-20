@@ -1,0 +1,17 @@
+# CPU-only PyTorch wheels — MUCH smaller than the default CUDA build (the
+# default pulls several GB of NVIDIA packages that aren't needed for this
+# toolkit and won't fit Streamlit Community Cloud's free-tier build limits).
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+yfinance>=1.6.0
+pandas>=2.0
+numpy>=1.24
+torch>=2.0
+scikit-learn>=1.3
+scipy>=1.10
+matplotlib>=3.7
+streamlit>=1.62
+plotly>=6.0
+
+# Optional — only needed if you use --source settrade for official SET data
+settrade-v2>=2.2.1

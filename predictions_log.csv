@@ -1,0 +1,1 @@
+run_date,ticker,source,model_type,horizon,as_of_date,target_date,last_close,predicted_price,predicted_change_pct,actual_price,error,abs_pct_error,direction_correct
