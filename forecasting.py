@@ -95,12 +95,45 @@ def prepare_features(cfg: ForecastConfig) -> pd.DataFrame:
     return feats
 
 
+def _require_min_rows(n: int, cfg: ForecastConfig, context: str = "") -> None:
+    """
+    Raise a clear, actionable error instead of letting an empty/too-small
+    split silently crash deep inside sklearn/torch with a confusing message.
+    """
+    # Rolling indicators (up to a 50-day window) already ate ~50 rows before
+    # `feats` even started; from what's left we still need enough rows for
+    # the lookback window plus a handful of usable sequences per split.
+    min_required = cfg.lookback + 20
+    if n < min_required:
+        raise ValueError(
+            f"Not enough usable data{f' for {context}' if context else ''}: "
+            f"only {n} row(s) remained after feature engineering (technical "
+            f"indicators need ~50 days to warm up), but lookback={cfg.lookback} "
+            f"requires at least {min_required} rows to build a handful of "
+            f"training sequences. Pick an earlier '--start'/'History start' "
+            f"date — at least 1-2 years of history is recommended — or "
+            f"reduce '--lookback'."
+        )
+
+
 def build_dataset(cfg: ForecastConfig):
     feats = prepare_features(cfg).dropna()
+    _require_min_rows(len(feats), cfg, context="the requested date range")
 
     n = len(feats)
     n_train = int(n * cfg.train_frac)
     n_val = int(n * cfg.val_frac)
+    n_test = n - n_train - n_val
+
+    if min(n_train, n_val, n_test) <= cfg.lookback:
+        raise ValueError(
+            f"Not enough data to form train/val/test splits with lookback="
+            f"{cfg.lookback}: got {n} usable rows total (train={n_train}, "
+            f"val={n_val}, test={n_test}), but each split needs to exceed "
+            f"the lookback window. Pick an earlier '--start'/'History start' "
+            f"date — at least 1-2 years of history is recommended — or "
+            f"reduce '--lookback'."
+        )
 
     train_df = feats.iloc[:n_train]
     val_df = feats.iloc[n_train:n_train + n_val]
@@ -387,6 +420,7 @@ def predict_next(cfg: ForecastConfig, device: str | None = None) -> dict:
 
     full_feats = prepare_features(cfg)          # has NaN target for last `horizon` rows
     train_feats = full_feats.dropna()             # rows with a known target, for training
+    _require_min_rows(len(train_feats), cfg, context="live prediction training")
 
     n = len(train_feats)
     n_val = max(cfg.lookback + 1, int(n * cfg.val_frac))
