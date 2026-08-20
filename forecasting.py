@@ -502,6 +502,32 @@ def predict_next(cfg: ForecastConfig, device: str | None = None) -> dict:
     }
 
 
+def predict_multi_horizon(cfg: ForecastConfig, horizons: tuple[int, ...] = (1, 2, 3),
+                           device: str | None = None) -> list[dict]:
+    """
+    Run predict_next() once per horizon, e.g. "next 3 targets" = the next
+    1-day-ahead, 2-day-ahead, and 3-day-ahead predictions, all made from
+    today's data.
+
+    Each horizon trains its OWN model (horizon changes what the target
+    column even means — log-return over 1 day vs. over 3 days — so these
+    aren't the same model queried three times; they're three independently
+    trained, independently evaluated models). This is straightforward and
+    leak-free, at the cost of being `len(horizons)`× the compute of a
+    single predict_next() call. An alternative — autoregressively feeding
+    the 1-day prediction back in as if it were real data to get a 2-day
+    prediction — was deliberately avoided: it compounds errors and would
+    require synthesizing plausible-looking OHLC/volume/indicator values
+    for a day that doesn't exist yet, which is a much shakier foundation
+    than just training a model that directly targets "N days from now."
+    """
+    results = []
+    for h in horizons:
+        h_cfg = ForecastConfig(**{**cfg.__dict__, "horizon": h})
+        results.append(predict_next(h_cfg, device=device))
+    return results
+
+
 # --------------------------------------------------------------------------- #
 # Hyperparameter tuning (scored by walk-forward validation, not a lucky split)
 # --------------------------------------------------------------------------- #
