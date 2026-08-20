@@ -103,7 +103,9 @@ def backfill_actuals(df: pd.DataFrame) -> pd.DataFrame:
 
 def log_new_predictions(df: pd.DataFrame, tickers: list[str], source: str,
                          model_type: str, horizon: int, lookback: int,
-                         start: str, epochs: int) -> pd.DataFrame:
+                         start: str, epochs: int,
+                         hidden_size: int = 64, num_layers: int = 2,
+                         dropout: float = 0.2) -> pd.DataFrame:
     run_date = pd.Timestamp.today().strftime("%Y-%m-%d")
     new_rows = []
 
@@ -119,6 +121,7 @@ def log_new_predictions(df: pd.DataFrame, tickers: list[str], source: str,
                 ticker=ticker, start=start, source=source,
                 horizon=horizon, lookback=lookback,
                 model_type=model_type, epochs=epochs,
+                hidden_size=hidden_size, num_layers=num_layers, dropout=dropout,
             )
             pred = predict_next(cfg)
         except Exception as e:
@@ -159,10 +162,17 @@ def main():
     p.add_argument("--source", choices=["yahoo", "settrade", "alpha_vantage", "twelve_data", "finnhub"], default="yahoo")
     p.add_argument("--model-type", choices=["lstm", "gru"], default="lstm")
     p.add_argument("--horizon", type=int, default=1)
-    p.add_argument("--lookback", type=int, default=60)
+    p.add_argument("--lookback", type=int, default=60,
+                    help="Overridden by --hidden-size etc. if you pass tuned values from forecasting.py --tune")
     p.add_argument("--start", default="2018-01-01", help="Training history start date")
     p.add_argument("--epochs", type=int, default=50,
                     help="Kept modest by default so this finishes quickly in CI")
+    p.add_argument("--hidden-size", type=int, default=64,
+                    help="LSTM/GRU hidden size — pass the value from forecasting.py --tune for a tuned model")
+    p.add_argument("--num-layers", type=int, default=2,
+                    help="LSTM/GRU layer count — pass the value from forecasting.py --tune for a tuned model")
+    p.add_argument("--dropout", type=float, default=0.2,
+                    help="Dropout rate — pass the value from forecasting.py --tune for a tuned model")
     args = p.parse_args()
 
     df = _load_log()
@@ -175,6 +185,7 @@ def main():
         df, tickers=args.tickers, source=args.source,
         model_type=args.model_type, horizon=args.horizon,
         lookback=args.lookback, start=args.start, epochs=args.epochs,
+        hidden_size=args.hidden_size, num_layers=args.num_layers, dropout=args.dropout,
     )
 
     _save_log(df)
