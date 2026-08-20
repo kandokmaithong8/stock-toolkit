@@ -510,8 +510,8 @@ def main():
     p.add_argument("--ticker", required=True)
     p.add_argument("--start", default="2015-01-01")
     p.add_argument("--end", default=None)
-    p.add_argument("--source", choices=["yahoo", "settrade"], default="yahoo",
-                    help="'settrade' requires SETTRADE_* env vars — see settrade_source.py")
+    p.add_argument("--source", choices=["yahoo", "settrade", "alpha_vantage", "twelve_data", "finnhub"], default="yahoo",
+                    help="non-yahoo sources need an API key env var — see each *_source.py module")
     p.add_argument("--horizon", type=int, default=1)
     p.add_argument("--lookback", type=int, default=60)
     p.add_argument("--model-type", choices=["lstm", "gru"], default="lstm")
