@@ -156,7 +156,7 @@ def log_new_predictions(df: pd.DataFrame, tickers: list[str], source: str,
 def main():
     p = argparse.ArgumentParser(description="Log live out-of-sample predictions and backfill outcomes")
     p.add_argument("--tickers", nargs="+", required=True)
-    p.add_argument("--source", choices=["yahoo", "settrade"], default="yahoo")
+    p.add_argument("--source", choices=["yahoo", "settrade", "alpha_vantage", "twelve_data", "finnhub"], default="yahoo")
     p.add_argument("--model-type", choices=["lstm", "gru"], default="lstm")
     p.add_argument("--horizon", type=int, default=1)
     p.add_argument("--lookback", type=int, default=60)
