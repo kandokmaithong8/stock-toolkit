@@ -43,11 +43,15 @@ jobs:
           SETTRADE_APP_CODE: ${{ secrets.SETTRADE_APP_CODE }}
         run: |
           python predict_logger.py \
-            --tickers AAPL MSFT GOOGL \
+            --tickers MRNA XHG NVDA MDXH CBRS \
             --source yahoo \
             --model-type lstm \
             --epochs 50
-          # Add a second line here with --source settrade and your SET
+          # CBRS is a recent 2026 IPO — it may not have the ~1-2 years of
+          # history predict_next() needs yet. If so it's skipped with a
+          # clear log message ("Failed to predict CBRS: ..."), not a crash;
+          # it'll start working automatically once enough history exists.
+          # Add a second block here with --source settrade and your SET
           # tickers (e.g. PTT KBANK AOT) once your credentials are set up.
 
       - name: Commit updated log
