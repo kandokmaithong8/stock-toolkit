@@ -35,24 +35,40 @@ jobs:
 
       - name: Run prediction logger
         env:
-          # Only needed if you're using --source settrade below. Add these
+          # Only needed for the sources you actually use below. Add these
           # as repo secrets under Settings > Secrets and variables > Actions.
           SETTRADE_APP_ID: ${{ secrets.SETTRADE_APP_ID }}
           SETTRADE_APP_SECRET: ${{ secrets.SETTRADE_APP_SECRET }}
           SETTRADE_BROKER_ID: ${{ secrets.SETTRADE_BROKER_ID }}
           SETTRADE_APP_CODE: ${{ secrets.SETTRADE_APP_CODE }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
         run: |
           python predict_logger.py \
             --tickers MRNA XHG NVDA MDXH CBRS \
             --source yahoo \
             --model-type lstm \
+            --horizons 1 2 3 \
             --epochs 50
+          # --horizons 1 2 3 logs the "next 3 targets" per ticker — 1-day,
+          # 2-day, and 3-day-ahead predictions, each from its own model
+          # (3x the training cost of a single horizon; still fine within
+          # a GitHub Actions run). Drop to --horizons 1 if you want the
+          # original single-target behavior back.
+          #
           # CBRS is a recent 2026 IPO — it may not have the ~1-2 years of
           # history predict_next() needs yet. If so it's skipped with a
           # clear log message ("Failed to predict CBRS: ..."), not a crash;
           # it'll start working automatically once enough history exists.
-          # Add a second block here with --source settrade and your SET
-          # tickers (e.g. PTT KBANK AOT) once your credentials are set up.
+          #
+          # If Yahoo ever breaks for you, swap --source yahoo for one of:
+          #   --source alpha_vantage   (25 req/day free — fine for ~5 tickers)
+          #   --source twelve_data     (800 req/day free — most headroom)
+          #   --source finnhub         (free tier currently blocks US stock
+          #                             candles — see finnhub_source.py)
+          # or --source settrade for SET tickers (e.g. PTT KBANK AOT) once
+          # your credentials are set up.
 
       - name: Commit updated log
         run: |
