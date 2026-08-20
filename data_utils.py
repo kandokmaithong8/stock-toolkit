@@ -3,10 +3,17 @@ data_utils.py
 Shared data-fetching and feature-engineering helpers for the forecasting
 and portfolio modules.
 
-Two data sources are supported, selected via `source=`:
-  - "yahoo"    (default) — yfinance, free/unofficial, global tickers.
-  - "settrade" — official Settrade Open API for SET-listed Thai equities.
-                 See settrade_source.py for credential setup.
+Data sources are supported, selected via `source=`:
+  - "yahoo"         (default) — yfinance, free/unofficial, global tickers.
+  - "settrade"      — official Settrade Open API for SET-listed Thai
+                      equities. See settrade_source.py for credential setup.
+  - "alpha_vantage" — free official API, 25 requests/day, 20+ years of
+                      daily history. See alpha_vantage_source.py.
+  - "twelve_data"   — free official API, 800 requests/day — the most
+                      headroom of the bunch. See twelve_data_source.py.
+  - "finnhub"       — free official API, BUT free-tier US stock candle
+                      access is currently restricted (see finnhub_source.py
+                      docstring before relying on this one).
 """
 
 from __future__ import annotations
@@ -15,7 +22,17 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-VALID_SOURCES = ("yahoo", "settrade")
+VALID_SOURCES = ("yahoo", "settrade", "alpha_vantage", "twelve_data", "finnhub")
+
+# Sources other than yahoo/settrade all follow the same simple per-ticker
+# fetch_ohlcv(ticker, start, end, interval) -> DataFrame contract, so they
+# can share one dispatch/import path instead of a special case each.
+_MODULE_BY_SOURCE = {
+    "settrade": "settrade_source",
+    "alpha_vantage": "alpha_vantage_source",
+    "twelve_data": "twelve_data_source",
+    "finnhub": "finnhub_source",
+}
 
 
 def _check_source(source: str) -> None:
@@ -28,19 +45,25 @@ def fetch_ohlcv(ticker: str, start: str, end: str | None = None,
     """
     Download OHLCV data for a single ticker.
 
-    source="yahoo":    ticker is a Yahoo symbol (e.g. "AAPL", "PTT.BK").
-    source="settrade": ticker is a bare SET symbol (e.g. "PTT", "KBANK") —
-                        requires Settrade Open API credentials, see
-                        settrade_source.py.
+    source="yahoo":         ticker is a Yahoo symbol (e.g. "AAPL", "PTT.BK").
+    source="settrade":      bare SET symbol (e.g. "PTT") — see settrade_source.py.
+    source="alpha_vantage": ticker as Alpha Vantage expects it (usually the
+                             plain US symbol) — see alpha_vantage_source.py.
+    source="twelve_data":   ticker as Twelve Data expects it — see
+                             twelve_data_source.py.
+    source="finnhub":       see finnhub_source.py — free-tier US stock
+                             candles are currently restricted, read that
+                             module's docstring before relying on it.
 
     Returns a DataFrame indexed by date with columns:
     Open, High, Low, Close, Volume
     """
     _check_source(source)
 
-    if source == "settrade":
-        import settrade_source
-        return settrade_source.fetch_ohlcv(ticker, start, end, interval)
+    if source in _MODULE_BY_SOURCE:
+        import importlib
+        adapter = importlib.import_module(_MODULE_BY_SOURCE[source])
+        return adapter.fetch_ohlcv(ticker, start, end, interval)
 
     df = yf.download(ticker, start=start, end=end, interval=interval,
                       auto_adjust=True, progress=False)
@@ -61,11 +84,15 @@ def fetch_multi_close(tickers: list[str], start: str, end: str | None = None,
     """
     _check_source(source)
 
-    if source == "settrade":
-        import settrade_source
+    if source in _MODULE_BY_SOURCE:
+        # None of these APIs offer a true multi-ticker batch call in a form
+        # this toolkit uses, so fetch each ticker's OHLCV individually and
+        # combine the Close columns. Fine for the toolkit's scale (a
+        # handful of tickers); watch your daily request budget on
+        # alpha_vantage (25/day) if you have many tickers.
         series = {}
         for t in tickers:
-            df = settrade_source.fetch_ohlcv(t, start, end, interval="1d")
+            df = fetch_ohlcv(t, start, end, interval="1d", source=source)
             series[t] = df["Close"]
         close = pd.DataFrame(series).dropna(how="all").ffill().dropna()
         if close.empty:
