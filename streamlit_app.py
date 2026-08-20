@@ -4,12 +4,16 @@ Interactive dashboard for the stock toolkit. Designed to run on Streamlit
 Community Cloud (free tier: ~1 CPU, ~1GB RAM) with no local machine
 involved — see README.md for the GitHub + Streamlit Cloud deployment guide.
 
-Three tabs:
+Four tabs:
   1. Portfolio Analyzer — return/risk metrics + mean-variance optimization
   2. Forecast Demo — train a small LSTM/GRU live, in-browser (capped small
      for cloud compute limits; use the CLI/GitHub Actions for serious runs)
   3. Live Predictions — reads predictions_log.csv (kept up to date by a
      scheduled GitHub Action) and shows the model's real track record
+  4. Rankings — ranks tracked tickers by the model's latest predicted move,
+     shown alongside each ticker's actual historical accuracy. This is a
+     view of what the model predicts, not a recommendation to buy/sell
+     anything — see the disclaimer at the top of that tab.
 """
 
 from __future__ import annotations
@@ -41,8 +45,8 @@ st.caption(
     "literature — not investment advice. See README.md for full context."
 )
 
-tab_portfolio, tab_forecast, tab_log = st.tabs(
-    ["Portfolio Analyzer", "Forecast Demo", "Live Predictions"]
+tab_portfolio, tab_forecast, tab_log, tab_rank = st.tabs(
+    ["Portfolio Analyzer", "Forecast Demo", "Live Predictions", "Rankings"]
 )
 
 # --------------------------------------------------------------------------- #
@@ -225,6 +229,24 @@ with tab_log:
             )
             filtered = log_df[log_df["ticker"].isin(ticker_filter)] if ticker_filter else log_df
 
+            # "Next targets" — the freshest still-unresolved prediction(s) per
+            # ticker, e.g. horizons=[1,2,3] shows the next 3 target dates.
+            unresolved = filtered[filtered["actual_price"].isna()].copy()
+            if not unresolved.empty:
+                st.markdown("**Next targets**")
+                latest_run = unresolved.groupby("ticker")["run_date"].transform("max")
+                next_targets = unresolved[unresolved["run_date"] == latest_run].sort_values(["ticker", "horizon"])
+                for ticker, grp in next_targets.groupby("ticker"):
+                    cols = st.columns(len(grp))
+                    for col, (_, row) in zip(cols, grp.iterrows()):
+                        arrow = "▲" if row["predicted_change_pct"] >= 0 else "▼"
+                        flag = "" if row.get("plausible", True) else " ⚠️"
+                        col.metric(
+                            f"{ticker} · {row['target_date']}",
+                            f"{row['predicted_price']:.2f}",
+                            f"{arrow} {row['predicted_change_pct']:+.2f}%{flag}",
+                        )
+
             if not filtered.dropna(subset=["actual_price"]).empty:
                 plot_df = filtered.dropna(subset=["actual_price"]).copy()
                 plot_df["target_date"] = pd.to_datetime(plot_df["target_date"])
@@ -242,3 +264,109 @@ with tab_log:
                     {True: "✅", False: "⚠️ flagged"}
                 ).fillna("—")
             st.dataframe(display_df, use_container_width=True)
+
+# --------------------------------------------------------------------------- #
+# Tab 4: Rankings
+# --------------------------------------------------------------------------- #
+with tab_rank:
+    st.subheader("Ticker rankings by predicted move")
+
+    st.warning(
+        "**Not investment advice.** This ranks tickers purely by what this "
+        "experimental LSTM/GRU model predicts — it knows nothing about "
+        "valuation, fundamentals, news, risk tolerance, or diversification. "
+        "The walk-forward validation elsewhere in this toolkit showed this "
+        "kind of model does **not** reliably beat a simple \"tomorrow = "
+        "today\" baseline. Treat this as one input to look at alongside "
+        "real research, not a signal to act on by itself. I'm not a "
+        "financial advisor, and this ranking isn't a recommendation to buy "
+        "or sell anything."
+    )
+
+    log_path = os.path.join(os.path.dirname(__file__), "predictions_log.csv")
+
+    if not os.path.exists(log_path):
+        st.info(
+            "No predictions_log.csv yet. It's created automatically once the "
+            "GitHub Action in .github/workflows/daily_predictions.yml has run "
+            "at least once — see README.md for setup."
+        )
+    else:
+        log_df = pd.read_csv(log_path)
+        if log_df.empty:
+            st.info("Log file exists but is empty — waiting on the first scheduled run.")
+        else:
+            available_horizons = sorted(log_df["horizon"].unique())
+            rank_horizon = st.selectbox(
+                "Rank by prediction horizon", available_horizons,
+                help="Which target to sort tickers by — e.g. horizon=1 ranks by tomorrow's predicted move."
+            )
+
+            # Latest unresolved prediction per ticker at the chosen horizon
+            hz_df = log_df[log_df["horizon"] == rank_horizon].copy()
+            unresolved = hz_df[hz_df["actual_price"].isna()]
+            if unresolved.empty:
+                st.info(
+                    f"No unresolved (not-yet-happened) predictions at horizon={rank_horizon}. "
+                    f"Try a different horizon, or wait for the next scheduled run."
+                )
+            else:
+                latest_run = unresolved.groupby("ticker")["run_date"].transform("max")
+                latest = unresolved[unresolved["run_date"] == latest_run].copy()
+
+                # Historical track record per ticker, from ALL resolved rows
+                # (any horizon) — small samples are common early on, so this
+                # is shown as context, not hidden or averaged away.
+                resolved = log_df.dropna(subset=["actual_price"]).copy()
+                track_record = resolved.groupby("ticker").agg(
+                    n_resolved=("direction_correct", "count"),
+                    hit_rate_pct=("direction_correct", lambda s: s.astype(bool).mean() * 100),
+                    mean_abs_pct_error=("abs_pct_error", "mean"),
+                ).reset_index()
+
+                ranked = latest.merge(track_record, on="ticker", how="left")
+
+                def _confidence_label(row):
+                    if pd.isna(row["n_resolved"]) or row["n_resolved"] < 3:
+                        return "Not enough track record yet"
+                    if row["hit_rate_pct"] >= 55:
+                        return "Above coin-flip historically"
+                    if row["hit_rate_pct"] <= 45:
+                        return "Below coin-flip historically"
+                    return "About coin-flip historically"
+
+                ranked["track_record"] = ranked.apply(_confidence_label, axis=1)
+                ranked = ranked.sort_values("predicted_change_pct", ascending=False)
+
+                fig = px.bar(
+                    ranked, x="ticker", y="predicted_change_pct", color="track_record",
+                    title=f"Predicted move by ticker (horizon={rank_horizon})",
+                    labels={"predicted_change_pct": "Predicted change (%)", "ticker": "Ticker"},
+                    color_discrete_map={
+                        "Above coin-flip historically": "#2ca02c",
+                        "About coin-flip historically": "#7f7f7f",
+                        "Below coin-flip historically": "#d62728",
+                        "Not enough track record yet": "#c7c7c7",
+                    },
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown("**Detail**")
+                show_cols = ["ticker", "target_date", "last_close", "predicted_price",
+                             "predicted_change_pct", "track_record", "hit_rate_pct",
+                             "mean_abs_pct_error", "n_resolved", "plausible"]
+                detail = ranked[[c for c in show_cols if c in ranked.columns]].copy()
+                if "plausible" in detail.columns:
+                    detail["plausible"] = detail["plausible"].map(
+                        {True: "✅", False: "⚠️ flagged"}
+                    ).fillna("—")
+                st.dataframe(detail, use_container_width=True, hide_index=True)
+
+                st.caption(
+                    "\"hit_rate_pct\" is the ticker's historical directional accuracy "
+                    "(predicted up/down vs. what actually happened) across all past "
+                    "resolved predictions — 50% is what random guessing gets you. "
+                    "\"Not enough track record yet\" means fewer than 3 resolved "
+                    "predictions exist for that ticker so far; give it time as the "
+                    "daily Action keeps logging."
+                )
