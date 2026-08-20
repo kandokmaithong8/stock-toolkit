@@ -90,6 +90,19 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     Add a standard set of technical indicators to an OHLCV DataFrame.
     All indicators are computed causally (no look-ahead) using only
     past/current data at each row.
+
+    Both raw (price-level) and relative (scale-invariant) versions of the
+    price-based indicators are included. forecasting.py's FEATURE_COLUMNS
+    deliberately uses only the relative versions (return_1d, close_to_sma_*,
+    bb_position, macd_*_norm, etc.) as model inputs — a StandardScaler fit
+    on raw price levels (Close, SMA, EMA, MACD, Bollinger Bands) breaks down
+    the moment a stock's price has drifted meaningfully since the training
+    period, because "today" then sits outside the range the scaler was
+    fit on and the model extrapolates wildly. Relative features stay in a
+    roughly stable range regardless of the stock's absolute price level or
+    how much it's grown, so they don't have this failure mode. The raw
+    columns are kept here for anyone who wants them (e.g. plotting), just
+    not fed to the model.
     """
     out = df.copy()
 
@@ -99,34 +112,48 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     for window in (5, 10, 20, 50):
         out[f"sma_{window}"] = out["Close"].rolling(window).mean()
         out[f"ema_{window}"] = out["Close"].ewm(span=window, adjust=False).mean()
+        # Relative versions: how far price sits from the moving average, as
+        # a fraction — stays in a stable range (~-0.2..0.2 typically)
+        # regardless of the stock's absolute price level.
+        out[f"close_to_sma_{window}"] = out["Close"] / out[f"sma_{window}"] - 1
+        out[f"close_to_ema_{window}"] = out["Close"] / out[f"ema_{window}"] - 1
 
     out["volatility_10"] = out["log_return_1d"].rolling(10).std()
     out["volatility_20"] = out["log_return_1d"].rolling(20).std()
 
-    # RSI (14)
+    # RSI (14) — already bounded 0-100, scale-invariant by construction
     delta = out["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gain / loss.replace(0, np.nan)
     out["rsi_14"] = 100 - (100 / (1 + rs))
 
-    # MACD (12, 26, 9)
+    # MACD (12, 26, 9) — raw MACD is in price units (an EMA difference), so
+    # it scales with the stock's price level just like SMA/EMA. Normalize
+    # by Close to get a relative version.
     ema12 = out["Close"].ewm(span=12, adjust=False).mean()
     ema26 = out["Close"].ewm(span=26, adjust=False).mean()
     out["macd"] = ema12 - ema26
     out["macd_signal"] = out["macd"].ewm(span=9, adjust=False).mean()
     out["macd_hist"] = out["macd"] - out["macd_signal"]
+    out["macd_norm"] = out["macd"] / out["Close"]
+    out["macd_signal_norm"] = out["macd_signal"] / out["Close"]
+    out["macd_hist_norm"] = out["macd_hist"] / out["Close"]
 
     # Bollinger Bands (20, 2 std)
     mid = out["Close"].rolling(20).mean()
     std = out["Close"].rolling(20).std()
     out["bb_upper"] = mid + 2 * std
     out["bb_lower"] = mid - 2 * std
-    out["bb_width"] = (out["bb_upper"] - out["bb_lower"]) / mid
+    out["bb_width"] = (out["bb_upper"] - out["bb_lower"]) / mid   # already relative
+    # Where Close sits within the bands, as a 0-1 fraction (already relative)
+    band_range = (out["bb_upper"] - out["bb_lower"]).replace(0, np.nan)
+    out["bb_position"] = (out["Close"] - out["bb_lower"]) / band_range
 
     # Volume features
-    out["volume_change"] = out["Volume"].pct_change()
+    out["volume_change"] = out["Volume"].pct_change()             # already relative
     out["volume_sma_10"] = out["Volume"].rolling(10).mean()
+    out["volume_ratio"] = out["Volume"] / out["volume_sma_10"].replace(0, np.nan) - 1
 
     out = out.dropna()
     return out
